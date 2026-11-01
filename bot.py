@@ -1,12 +1,14 @@
 import os
+import traceback
 import telebot
 from flask import Flask, request
 from google import genai
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-BOT_USERNAME = (os.environ.get("BOT_USERNAME") or "").lstrip("@").lower()
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL")
+TOKEN = (os.environ.get("TELEGRAM_TOKEN") or "").strip()
+GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
+BOT_USERNAME = (os.environ.get("BOT_USERNAME") or "").strip().lstrip("@").lower()
+RENDER_EXTERNAL_URL = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -15,9 +17,12 @@ app = Flask(__name__)
 
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
-    bot.process_new_updates([update])
-    return "!", 200
+    try:
+        update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
+        bot.process_new_updates([update])
+    except Exception:
+        traceback.print_exc()  # xem chi tiết trong Logs của Render
+    return "!", 200  # luôn trả 200 để Telegram không gửi lại tin cũ
 
 
 @app.route("/")
@@ -38,10 +43,16 @@ def handle_message(message):
             and reply.from_user is not None
             and (reply.from_user.username or "").lower() == BOT_USERNAME
         )
-        is_mentioned = f"@{BOT_USERNAME}" in text.lower()
+        is_mentioned = bool(BOT_USERNAME) and f"@{BOT_USERNAME}" in text.lower()
         if not (is_mentioned or is_reply_to_bot):
             return
-        prompt_text = text.replace(f"@{BOT_USERNAME}", "").strip()
+        # xoá mention không phân biệt hoa/thường
+        prompt_text = text
+        if is_mentioned:
+            idx = text.lower().find(f"@{BOT_USERNAME}")
+            prompt_text = (text[:idx] + text[idx + len(BOT_USERNAME) + 1:]).strip()
+        else:
+            prompt_text = text.strip()
     else:
         prompt_text = text.strip()
 
@@ -50,21 +61,28 @@ def handle_message(message):
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.8-flash",
+            model=GEMINI_MODEL,
             contents=prompt_text,
         )
         answer = response.text or "Mình chưa có câu trả lời cho việc này."
         for i in range(0, len(answer), 4000):
             bot.reply_to(message, answer[i:i + 4000])
     except Exception as e:
-        print("Lỗi:", e)
-        bot.reply_to(message, f"⚠️ Đã xảy ra lỗi: {e}")
+        print("Lỗi:", repr(e))
+        traceback.print_exc()
+        try:
+            bot.reply_to(message, "⚠️ Đã xảy ra lỗi khi gọi AI, bạn thử lại sau nhé.")
+        except Exception:
+            traceback.print_exc()
 
 
-# Chạy cả khi dùng gunicorn
-if RENDER_EXTERNAL_URL:
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{TOKEN}")
+# Đăng ký webhook (chạy cả khi dùng gunicorn)
+if RENDER_EXTERNAL_URL and TOKEN:
+    try:
+        bot.remove_webhook()
+        bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{TOKEN}")
+    except Exception:
+        traceback.print_exc()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
