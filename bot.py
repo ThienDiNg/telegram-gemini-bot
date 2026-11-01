@@ -48,7 +48,7 @@ def handle_message(message):
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model="gemini-2.5-flash",
             contents=prompt_text,
         )
         bot.reply_to(message, response.text)
@@ -56,10 +56,5 @@ def handle_message(message):
         bot.reply_to(message, f"⚠️ Đã xảy ra lỗi: {e}")
 
 if __name__ == "__main__":
-    # Tự động cấu hình Webhook khi Render khởi chạy
-    if RENDER_EXTERNAL_URL:
-        bot.remove_webhook()
-        bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{TOKEN}")
-    
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
