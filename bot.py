@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import threading
 import traceback
 import telebot
@@ -38,6 +39,14 @@ class AllModelsFailed(Exception):
     pass
 
 
+class AllModelsCoolingDown(Exception):
+    def __init__(self, retry_after):
+        self.retry_after = retry_after
+        super().__init__(
+            f"All models are cooling down. Retry after {retry_after:.1f} seconds."
+        )
+
+
 def _error_code(e):
     code = getattr(e, "code", None)
     if isinstance(code, int):
@@ -50,43 +59,94 @@ def _error_code(e):
 
 
 def _next_models():
-    """Trả về danh sách model theo thứ tự thử, bắt đầu từ vị trí xoay tua."""
+    """Trả về danh sách model khả dụng theo thứ tự xoay tua."""
     global _counter
+
     with _lock:
+        now = time.monotonic()
+
         start = _counter % len(GEMINI_MODELS)
         _counter += 1
-        now = time.time()
+
         ordered = GEMINI_MODELS[start:] + GEMINI_MODELS[:start]
-        available = [m for m in ordered if _cooldown_until.get(m, 0) <= now]
-        # nếu tất cả đang nghỉ thì vẫn thử lại toàn bộ
-        return available or ordered
+
+        available = [
+            model
+            for model in ordered
+            if _cooldown_until.get(model, 0) <= now
+        ]
+
+        if not available:
+            retry_after = min(
+                _cooldown_until.get(model, now) - now
+                for model in GEMINI_MODELS
+            )
+            raise AllModelsCoolingDown(max(0, retry_after))
+
+        return available
 
 
 def _put_to_rest(model, seconds):
     with _lock:
-        _cooldown_until[model] = time.time() + seconds
+        _cooldown_until[model] = time.monotonic() + seconds
+
+
+def _format_wait(seconds):
+    seconds = max(1, math.ceil(seconds))
+
+    if seconds < 60:
+        return f"{seconds} giây"
+
+    minutes, remaining_seconds = divmod(seconds, 60)
+
+    if minutes < 60:
+        if remaining_seconds:
+            return f"{minutes} phút {remaining_seconds} giây"
+        return f"{minutes} phút"
+
+    hours, remaining_minutes = divmod(minutes, 60)
+
+    if remaining_minutes:
+        return f"{hours} giờ {remaining_minutes} phút"
+
+    return f"{hours} giờ"
 
 
 def ask_gemini(prompt):
     last_error = None
+
     for model in _next_models():
         try:
-            response = client.models.generate_content(model=model, contents=prompt)
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt
+            )
+
             answer = response.text or "Mình chưa có câu trả lời cho việc này."
             print(f"[OK] model={model}")
             return answer
+
         except Exception as e:
             last_error = e
             code = _error_code(e)
+
             if code == 429:
                 _put_to_rest(model, COOLDOWN_QUOTA)
+
             elif code == 404:
                 _put_to_rest(model, COOLDOWN_MISSING)
+
             elif code in (500, 503):
                 _put_to_rest(model, COOLDOWN_BUSY)
+
             else:
-                raise  # lỗi khác (ví dụ API key sai) thì không xoay tua
-            print(f"[SKIP] model={model} code={code}, thử model kế tiếp")
+                raise
+
+            print(
+                f"[SKIP] model={model} code={code}, "
+                "thử model kế tiếp"
+            )
+
     raise AllModelsFailed(str(last_error))
 
 
@@ -139,8 +199,17 @@ def handle_message(message):
     except Exception as e:
         print("Lỗi:", repr(e))
         traceback.print_exc()
-        if isinstance(e, AllModelsFailed):
-            msg = "⚠️ Bot đã hết lượt dùng AI lúc này, bạn quay lại sau nhé."
+
+        if isinstance(e, AllModelsCoolingDown):
+            wait_time = _format_wait(e.retry_after)
+            msg = (
+                f"⏳ Tất cả AI hiện đang bận hoặc hết lượt sử dụng.\n"
+                f"Bạn vui lòng thử lại sau {wait_time} nhé."
+            )
+
+        elif isinstance(e, AllModelsFailed):
+            msg = "⚠️ Các model AI hiện không khả dụng, bạn quay lại sau nhé."
+
         else:
             msg = "⚠️ Đã xảy ra lỗi khi gọi AI, bạn thử lại sau nhé."
         try:
