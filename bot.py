@@ -3,11 +3,15 @@ import time
 import math
 import threading
 import traceback
+import secrets
 import telebot
 from flask import Flask, request
 from google import genai
 
 TOKEN = (os.environ.get("TELEGRAM_TOKEN") or "").strip()
+WEBHOOK_SECRET = (
+    os.environ.get("TELEGRAM_WEBHOOK_SECRET") or ""
+).strip()
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
 BOT_USERNAME = (os.environ.get("BOT_USERNAME") or "").strip().lstrip("@").lower()
 RENDER_EXTERNAL_URL = (os.environ.get("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
@@ -150,13 +154,26 @@ def ask_gemini(prompt):
     raise AllModelsFailed(str(last_error))
 
 
-@app.route(f"/{TOKEN}", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
+    received_secret = request.headers.get(
+        "X-Telegram-Bot-Api-Secret-Token", ""
+    )
+
+    if (
+        not WEBHOOK_SECRET
+        or not secrets.compare_digest(received_secret, WEBHOOK_SECRET)
+    ):
+        return "Forbidden", 403
+
     try:
-        update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
+        update = telebot.types.Update.de_json(
+            request.get_data().decode("utf-8")
+        )
         bot.process_new_updates([update])
     except Exception:
         traceback.print_exc()
+
     return "!", 200
 
 
@@ -218,12 +235,25 @@ def handle_message(message):
             traceback.print_exc()
 
 
-if RENDER_EXTERNAL_URL and TOKEN:
-    try:
-        bot.remove_webhook()
-        bot.set_webhook(url=f"{RENDER_EXTERNAL_URL}/{TOKEN}")
-    except Exception:
-        traceback.print_exc()
+def register_webhook():
+    if RENDER_EXTERNAL_URL and TOKEN and WEBHOOK_SECRET:
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(
+                url=f"{RENDER_EXTERNAL_URL}/webhook",
+                secret_token=WEBHOOK_SECRET,
+            )
+        except Exception:
+            traceback.print_exc()
+
+    elif RENDER_EXTERNAL_URL and TOKEN:
+        print(
+            "[ERROR] TELEGRAM_WEBHOOK_SECRET is missing. "
+            "Webhook was not registered."
+        )
+
+
+register_webhook()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
